@@ -1,8 +1,11 @@
 import os
 import sys
 import jwt
+import pam
 import socket
 import sqlite3
+import getpass
+import platform
 from os.path import expanduser
 from keyring.backend import KeyringBackend
 
@@ -16,12 +19,56 @@ class JWTKeyring(KeyringBackend):
 
     def __init__(self):
         self.password = ''
+        self.__non_sudo()
+        try:
+            self.__os_auth()
+        except KeyboardInterrupt:
+            print " -- Cancelled"
+            sys.exit(1)
+
+    def __os_auth(self):
+        p = pam.pam()
+        sys_info = self.__sys_details()
+        pass_msg = ''' KeyChain password ({0}@{1} Auth): '''
+        keyring_user = getpass.getuser()
+        keyring_pass = getpass.getpass(pass_msg.format(keyring_user,
+                                                       sys_info['hostname']))
+        if not p.authenticate(keyring_user, keyring_pass):
+            print "Authentication Error: {0} - {1}".format(p.code, p.reason)
+            return False
+        return True
+
+    def __sys_details(self):
+        return {'os': platform.system(),
+                'hostname': socket.getfqdn(),
+                'release': platform.release()}
 
     def __jwt_encode(self, dictionary):
+        """ Converts presented dictionary into jwt token
+
+        Args:
+            dictionary (dict): Structure to be stored
+        Returns:
+            token (str): Encrypted jwt token with payload
+        """
         return jwt.encode(dictionary, SECRET_KEY, algorithm=ENCRYPTION_TYPE)
 
-    def __jwt_decode(self, dictionary):
-        return jwt.decode(dictionary, SECRET_KEY, algorithms=[ENCRYPTION_TYPE])
+    def __jwt_decode(self, token):
+        """ Converts presented token into response dictionary
+
+        Args:
+            token (str): jwt token to be decrypted
+        Returns:
+            dictionary (dict): Stuctured response stored entry
+        """
+        return jwt.decode(token, SECRET_KEY, algorithms=[ENCRYPTION_TYPE])
+
+    def __non_sudo(self):
+        """ Ensures that the application user is not root """
+        root_msg = ''' Cannot run this application as root '''
+        if os.getuid() == 0:
+            print root_msg
+            sys.exit(2)
 
     def _connect(self):
         """ Creates database if it does not exist or connects """
@@ -40,7 +87,15 @@ class JWTKeyring(KeyringBackend):
         return conn
 
     def _select(self, conn, service, username):
-        """ Queries database for jwtoken to decypher """
+        """ Queries database for jwtoken to decypher
+
+        Args:
+            conn (obj): Connection object
+            service (str): Service name category to store under
+            username (str): Service username to be retrieved (key)
+        Returns:
+            password (str): Service password (value) of stored key
+        """
         key = '{0}:{1}'.format(service, username)
         SELECT = ''' SELECT jwtoken FROM keystore WHERE store_key = ?; '''
         cur = conn.cursor()
@@ -53,7 +108,16 @@ class JWTKeyring(KeyringBackend):
             return None
 
     def _insert(self, conn, service, username, password):
-        """ Inserts JWT token by key encrypted for storage """
+        """ Inserts JWT token by key encrypted for storage
+
+        Args:
+            conn (obj): Connection object
+            service (str): Service name category to store under
+            username (str): Service username to be stored (key)
+            password (str): Service password (key) to store encrypted
+        Returns:
+            No value returned
+        """
         key = '{0}:{1}'.format(service, username)
         INSERT = ''' INSERT INTO keystore (store_key, jwtoken) VALUES (?, ?);
             '''
@@ -65,7 +129,15 @@ class JWTKeyring(KeyringBackend):
         conn.commit()
 
     def _delete(self, conn, service, username):
-        """ Deletes JWT token associated with key """
+        """ Deletes JWT token associated with key
+
+        Args:
+            conn (obj): Connection object
+            service (str): Service name category to store under
+            username (str): Service username to delete entry with service
+        Returns:
+            No value returned
+        """
         key = '{0}:{1}'.format(service, username)
         DELETE = ''' DELETE FROM keystore WHERE store_key = ?; '''
         conn.execute(DELETE, [key])
